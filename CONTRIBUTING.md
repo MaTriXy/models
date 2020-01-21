@@ -1,7 +1,7 @@
 # Contributing guidelines
 
 If you have created a model and would like to publish it here, please send us a
-pull request. For those just getting started with pull reuests, GitHub has a
+pull request. For those just getting started with pull requests, GitHub has a
 [howto](https://help.github.com/articles/using-pull-requests/).
 
 The code for any model in this repository is licensed under the Apache License
@@ -9,6 +9,9 @@ The code for any model in this repository is licensed under the Apache License
 
 In order to accept our code, we have to make sure that we can publish your code:
 You have to sign a Contributor License Agreement (CLA).
+
+***NOTE***: Only [code owners](./CODEOWNERS) are allowed to merge a pull request. 
+Please contact the code owners of each model to merge your pull request.
 
 ### Contributor License Agreements
 
