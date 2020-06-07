@@ -14,11 +14,9 @@
 # ==============================================================================
 """BottleneckConvLSTMCell implementation."""
 
-import tensorflow as tf
-
-from tensorflow.contrib import layers as contrib_layers
+import tensorflow.compat.v1 as tf
+import tf_slim as slim
 from tensorflow.contrib import rnn as contrib_rnn
-from tensorflow.contrib import slim
 from tensorflow.contrib.framework.python.ops import variables as contrib_variables
 import lstm_object_detection.lstm.utils as lstm_utils
 
@@ -121,7 +119,7 @@ class BottleneckConvLSTMCell(contrib_rnn.RNNCell):
       if self._pre_bottleneck:
         bottleneck = inputs
       else:
-        bottleneck = contrib_layers.separable_conv2d(
+        bottleneck = slim.separable_conv2d(
             tf.concat([inputs, h], 3),
             self._num_units,
             self._filter_size,
@@ -133,7 +131,7 @@ class BottleneckConvLSTMCell(contrib_rnn.RNNCell):
         if self._viz_gates:
           slim.summaries.add_histogram_summary(bottleneck, 'bottleneck')
 
-      concat = contrib_layers.separable_conv2d(
+      concat = slim.separable_conv2d(
           bottleneck,
           4 * self._num_units,
           self._filter_size,
@@ -243,7 +241,7 @@ class BottleneckConvLSTMCell(contrib_rnn.RNNCell):
       state = tf.reshape(state, [batch_size, height, width, -1])
     with tf.variable_scope('conv_lstm_cell', reuse=tf.AUTO_REUSE):
       scope_name = 'bottleneck_%d' % input_index
-      inputs = contrib_layers.separable_conv2d(
+      inputs = slim.separable_conv2d(
           tf.concat([inputs, state], 3),
           self.output_size[-1],
           self._filter_size,
@@ -494,11 +492,10 @@ class GroupedConvLSTMCell(contrib_rnn.RNNCell):
         f_act = tf.sigmoid(f_add)
         # The quantization range is fixed for the sigmoid to ensure that zero
         # is exactly representable.
-        f_act = lstm_utils.quantize_op(
+        f_act = lstm_utils.fixed_quantize_op(
             f_act,
-            is_training=False,
-            default_min=0,
-            default_max=1,
+            fixed_min=0.0,
+            fixed_max=1.0,
             is_quantized=self._is_quantized,
             scope='forget_gate_%d/act_quant' % k)
 
@@ -512,22 +509,20 @@ class GroupedConvLSTMCell(contrib_rnn.RNNCell):
         i_act = tf.sigmoid(i)
         # The quantization range is fixed for the sigmoid to ensure that zero
         # is exactly representable.
-        i_act = lstm_utils.quantize_op(
+        i_act = lstm_utils.fixed_quantize_op(
             i_act,
-            is_training=False,
-            default_min=0,
-            default_max=1,
+            fixed_min=0.0,
+            fixed_max=1.0,
             is_quantized=self._is_quantized,
             scope='input_gate_%d/act_quant' % k)
 
         j_act = self._activation(j)
         # The quantization range is fixed for the relu6 to ensure that zero
         # is exactly representable.
-        j_act = lstm_utils.quantize_op(
+        j_act = lstm_utils.fixed_quantize_op(
             j_act,
-            is_training=False,
-            default_min=0,
-            default_max=6,
+            fixed_min=0.0,
+            fixed_max=6.0,
             is_quantized=self._is_quantized,
             scope='new_input_%d/act_quant' % k)
 
@@ -546,11 +541,10 @@ class GroupedConvLSTMCell(contrib_rnn.RNNCell):
         # to the concat have the same range, removing the need for rescaling.
         # The quantization ranges input to the relu6 are propagated to its
         # output. Any mismatch between these two ranges will cause an error.
-        new_c = lstm_utils.quantize_op(
+        new_c = lstm_utils.fixed_quantize_op(
             new_c,
-            is_training=False,
-            default_min=0,
-            default_max=6,
+            fixed_min=0.0,
+            fixed_max=6.0,
             is_quantized=self._is_quantized,
             scope='new_c_%d/add_quant' % k)
 
@@ -565,22 +559,20 @@ class GroupedConvLSTMCell(contrib_rnn.RNNCell):
         new_c_act = self._activation(new_c)
         # The quantization range is fixed for the relu6 to ensure that zero
         # is exactly representable.
-        new_c_act = lstm_utils.quantize_op(
+        new_c_act = lstm_utils.fixed_quantize_op(
             new_c_act,
-            is_training=False,
-            default_min=0,
-            default_max=6,
+            fixed_min=0.0,
+            fixed_max=6.0,
             is_quantized=self._is_quantized,
             scope='new_c_%d/act_quant' % k)
 
         o_act = tf.sigmoid(o)
         # The quantization range is fixed for the sigmoid to ensure that zero
         # is exactly representable.
-        o_act = lstm_utils.quantize_op(
+        o_act = lstm_utils.fixed_quantize_op(
             o_act,
-            is_training=False,
-            default_min=0,
-            default_max=1,
+            fixed_min=0.0,
+            fixed_max=1.0,
             is_quantized=self._is_quantized,
             scope='output_%d/act_quant' % k)
 
@@ -588,11 +580,10 @@ class GroupedConvLSTMCell(contrib_rnn.RNNCell):
         # The quantization range is fixed since it is input to a concat.
         # A range of [0, 6] is used since |new_h| is a product of ranges [0, 6]
         # and [0, 1].
-        new_h_act = lstm_utils.quantize_op(
+        new_h_act = lstm_utils.fixed_quantize_op(
             new_h,
-            is_training=False,
-            default_min=0,
-            default_max=6,
+            fixed_min=0.0,
+            fixed_max=6.0,
             is_quantized=self._is_quantized,
             scope='new_h_%d/act_quant' % k)
 
@@ -710,7 +701,8 @@ class GroupedConvLSTMCell(contrib_rnn.RNNCell):
       raise ValueError('Expect rank 2 state tensor when flatten_state is set.')
 
     with tf.name_scope(None):
-      state = tf.identity(state, name='raw_inputs/init_lstm_h')
+      state = tf.identity(
+          state, name='raw_inputs/init_lstm_h_%d' % (input_index + 1))
     if self._flatten_state:
       batch_size = inputs.shape[0]
       height = inputs.shape[1]
