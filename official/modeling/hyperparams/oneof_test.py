@@ -1,5 +1,4 @@
-# Lint as: python3
-# Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2024 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
 
 import dataclasses
-import tensorflow as tf
+import tensorflow as tf, tf_keras
 from official.modeling.hyperparams import base_config
 from official.modeling.hyperparams import oneof
 
@@ -28,7 +26,7 @@ class ResNet(base_config.Config):
 @dataclasses.dataclass
 class Backbone(oneof.OneOfConfig):
   type: str = 'resnet'
-  resnet: ResNet = ResNet()
+  resnet: ResNet = dataclasses.field(default_factory=ResNet)
   not_resnet: int = 2
 
 
@@ -41,19 +39,25 @@ class OutputLayer(oneof.OneOfConfig):
 
 @dataclasses.dataclass
 class Network(base_config.Config):
-  backbone: Backbone = Backbone()
-  output_layer: OutputLayer = OutputLayer()
+  backbone: Backbone = dataclasses.field(default_factory=Backbone)
+  output_layer: OutputLayer = dataclasses.field(default_factory=OutputLayer)
 
 
 class OneOfTest(tf.test.TestCase):
 
   def test_to_dict(self):
-    network_params = {'backbone': {'type': 'resnet',
-                                   'resnet': {'model_depth': 50}
-                                   },
-                      'output_layer': {'type': 'single',
-                                       'single': 1000}
-                      }
+    network_params = {
+        'backbone': {
+            'type': 'resnet',
+            'resnet': {
+                'model_depth': 50
+            }
+        },
+        'output_layer': {
+            'type': 'single',
+            'single': 1000
+        }
+    }
     network_config = Network(network_params)
     self.assertEqual(network_config.as_dict(), network_params)
 

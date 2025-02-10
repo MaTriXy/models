@@ -1,4 +1,3 @@
-# Lint as: python2, python3
 # Copyright 2017 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,9 +26,9 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import math
 import tensorflow.compat.v1 as tf
 
-from tensorflow.contrib import data as tf_data
 from object_detection.builders import decoder_builder
 from object_detection.protos import input_reader_pb2
 
@@ -51,20 +50,24 @@ def make_initializable_iterator(dataset):
   return iterator
 
 
-def read_dataset(file_read_func, input_files, config,
-                 filename_shard_fn=None):
+def _read_dataset_internal(file_read_func,
+                           input_files,
+                           num_readers,
+                           config,
+                           filename_shard_fn=None):
   """Reads a dataset, and handles repetition and shuffling.
 
   Args:
-    file_read_func: Function to use in tf_data.parallel_interleave, to
-      read every individual file into a tf.data.Dataset.
+    file_read_func: Function to use in tf_data.parallel_interleave, to read
+      every individual file into a tf.data.Dataset.
     input_files: A list of file paths to read.
+    num_readers: Number of readers to use.
     config: A input_reader_builder.InputReader object.
-    filename_shard_fn: optional, A funciton used to shard filenames across
-      replicas. This function takes as input a TF dataset of filenames and
-      is expected to return its sharded version. It is useful when the
-      dataset is being loaded on one of possibly many replicas and we want
-      to evenly shard the files between the replicas.
+    filename_shard_fn: optional, A function used to shard filenames across
+      replicas. This function takes as input a TF dataset of filenames and is
+      expected to return its sharded version. It is useful when the dataset is
+      being loaded on one of possibly many replicas and we want to evenly shard
+      the files between the replicas.
 
   Returns:
     A tf.data.Dataset of (undecoded) tf-records based on config.
@@ -72,12 +75,12 @@ def read_dataset(file_read_func, input_files, config,
   Raises:
     RuntimeError: If no files are found at the supplied path(s).
   """
-  # Shard, shuffle, and read files.
   filenames = tf.gfile.Glob(input_files)
+  tf.logging.info('Reading record datasets for input file: %s' % input_files)
+  tf.logging.info('Number of filenames to read: %s' % len(filenames))
   if not filenames:
     raise RuntimeError('Did not find any input files matching the glob pattern '
                        '{}'.format(input_files))
-  num_readers = config.num_readers
   if num_readers > len(filenames):
     num_readers = len(filenames)
     tf.logging.warning('num_readers has been reduced to %d to match input file '
@@ -94,7 +97,7 @@ def read_dataset(file_read_func, input_files, config,
 
   filename_dataset = filename_dataset.repeat(config.num_epochs or None)
   records_dataset = filename_dataset.apply(
-      tf_data.parallel_interleave(
+      tf.data.experimental.parallel_interleave(
           file_read_func,
           cycle_length=num_readers,
           block_length=config.read_block_length,
@@ -102,6 +105,63 @@ def read_dataset(file_read_func, input_files, config,
   if config.shuffle:
     records_dataset = records_dataset.shuffle(config.shuffle_buffer_size)
   return records_dataset
+
+
+def read_dataset(file_read_func, input_files, config, filename_shard_fn=None):
+  """Reads multiple datasets with sampling.
+
+  Args:
+    file_read_func: Function to use in tf_data.parallel_interleave, to read
+      every individual file into a tf.data.Dataset.
+    input_files: A list of file paths to read.
+    config: A input_reader_builder.InputReader object.
+    filename_shard_fn: optional, A function used to shard filenames across
+      replicas. This function takes as input a TF dataset of filenames and is
+      expected to return its sharded version. It is useful when the dataset is
+      being loaded on one of possibly many replicas and we want to evenly shard
+      the files between the replicas.
+
+  Returns:
+    A tf.data.Dataset of (undecoded) tf-records based on config.
+
+  Raises:
+    RuntimeError: If no files are found at the supplied path(s).
+  """
+  if config.sample_from_datasets_weights:
+    tf.logging.info('Reading weighted datasets: %s' % input_files)
+    if len(input_files) != len(config.sample_from_datasets_weights):
+      raise ValueError('Expected the number of input files to be the same as '
+                       'the number of dataset sample weights. But got '
+                       '[input_files, sample_from_datasets_weights]: [' +
+                       input_files + ', ' +
+                       str(config.sample_from_datasets_weights) + ']')
+    tf.logging.info('Sampling from datasets %s with weights %s' %
+                    (input_files, config.sample_from_datasets_weights))
+    records_datasets = []
+    dataset_weights = []
+    for i, input_file in enumerate(input_files):
+      weight = config.sample_from_datasets_weights[i]
+      num_readers = math.ceil(config.num_readers *
+                              weight /
+                              sum(config.sample_from_datasets_weights))
+      tf.logging.info(
+          'Num readers for dataset [%s]: %d', input_file, num_readers)
+      if num_readers == 0:
+        tf.logging.info('Skipping dataset due to zero weights: %s', input_file)
+        continue
+      tf.logging.info(
+          'Num readers for dataset [%s]: %d', input_file, num_readers)
+      records_dataset = _read_dataset_internal(file_read_func, [input_file],
+                                               num_readers, config,
+                                               filename_shard_fn)
+      dataset_weights.append(weight)
+      records_datasets.append(records_dataset)
+    return tf.data.experimental.sample_from_datasets(records_datasets,
+                                                     dataset_weights)
+  else:
+    tf.logging.info('Reading unweighted datasets: %s' % input_files)
+    return _read_dataset_internal(file_read_func, input_files,
+                                  config.num_readers, config, filename_shard_fn)
 
 
 def shard_function_for_context(input_context):
@@ -153,6 +213,30 @@ def build(input_reader_config, batch_size=None, transform_input_data_fn=None,
     if not config.input_path:
       raise ValueError('At least one input path must be specified in '
                        '`input_reader_config`.')
+    def dataset_map_fn(dataset, fn_to_map, batch_size=None,
+                       input_reader_config=None):
+      """Handles whether or not to use the legacy map function.
+
+      Args:
+        dataset: A tf.Dataset.
+        fn_to_map: The function to be mapped for that dataset.
+        batch_size: Batch size. If batch size is None, no batching is performed.
+        input_reader_config: A input_reader_pb2.InputReader object.
+
+      Returns:
+        A tf.data.Dataset mapped with fn_to_map.
+      """
+      if hasattr(dataset, 'map_with_legacy_function'):
+        if batch_size:
+          num_parallel_calls = batch_size * (
+              input_reader_config.num_parallel_batches)
+        else:
+          num_parallel_calls = input_reader_config.num_parallel_map_calls
+        dataset = dataset.map_with_legacy_function(
+            fn_to_map, num_parallel_calls=num_parallel_calls)
+      else:
+        dataset = dataset.map(fn_to_map, tf.data.experimental.AUTOTUNE)
+      return dataset
     shard_fn = shard_function_for_context(input_context)
     if input_context is not None:
       batch_size = input_context.get_per_replica_batch_size(batch_size)
@@ -163,15 +247,17 @@ def build(input_reader_config, batch_size=None, transform_input_data_fn=None,
       dataset = dataset.shard(input_reader_config.sample_1_of_n_examples, 0)
     # TODO(rathodv): make batch size a required argument once the old binaries
     # are deleted.
-    dataset = dataset.map(decoder.decode, tf.data.experimental.AUTOTUNE)
+    dataset = dataset_map_fn(dataset, decoder.decode, batch_size,
+                             input_reader_config)
     if reduce_to_frame_fn:
-      dataset = reduce_to_frame_fn(dataset)
+      dataset = reduce_to_frame_fn(dataset, dataset_map_fn, batch_size,
+                                   input_reader_config)
     if transform_input_data_fn is not None:
-      dataset = dataset.map(transform_input_data_fn,
-                            tf.data.experimental.AUTOTUNE)
+      dataset = dataset_map_fn(dataset, transform_input_data_fn,
+                               batch_size, input_reader_config)
     if batch_size:
-      dataset = dataset.apply(
-          tf_data.batch_and_drop_remainder(batch_size))
+      dataset = dataset.batch(batch_size,
+                              drop_remainder=input_reader_config.drop_remainder)
     dataset = dataset.prefetch(input_reader_config.num_prefetch_batches)
     return dataset
 

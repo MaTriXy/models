@@ -1,4 +1,3 @@
-# Lint as: python2, python3
 # Copyright 2017 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -197,13 +196,13 @@ class DatasetBuilderTest(test_case.TestCase):
         output_dict[fields.InputDataFields.groundtruth_boxes][0][0])
 
   def get_mock_reduce_to_frame_fn(self):
-    def mock_reduce_to_frame_fn(dataset):
+    def mock_reduce_to_frame_fn(dataset, dataset_map_fn, batch_size, config):
       def get_frame(tensor_dict):
         out_tensor_dict = {}
         out_tensor_dict[fields.InputDataFields.source_id] = (
             tensor_dict[fields.InputDataFields.source_id][0])
         return out_tensor_dict
-      return dataset.map(get_frame, tf.data.experimental.AUTOTUNE)
+      return dataset_map_fn(dataset, get_frame, batch_size, config)
     return mock_reduce_to_frame_fn
 
   def test_build_tf_record_input_reader_sequence_example_train(self):
@@ -390,7 +389,7 @@ class DatasetBuilderTest(test_case.TestCase):
       return iter1.get_next(), iter2.get_next()
 
     output_dict1, output_dict2 = self.execute(graph_fn, [])
-    self.assertAllEqual(['0'], output_dict1[fields.InputDataFields.source_id])
+    self.assertAllEqual([b'0'], output_dict1[fields.InputDataFields.source_id])
     self.assertEqual([b'1'], output_dict2[fields.InputDataFields.source_id])
 
   def test_sample_one_of_n_shards(self):
@@ -532,13 +531,23 @@ class ReadDatasetTest(test_case.TestCase):
 
     return get_iterator_next_for_testing(dataset, self.is_tf2())
 
+  def _assert_item_count(self, data, item, percentage):
+    self.assertAlmostEqual(data.count(item)/len(data), percentage, places=1)
+
   def test_make_initializable_iterator_with_hashTable(self):
 
     def graph_fn():
       keys = [1, 0, -1]
       dataset = tf.data.Dataset.from_tensor_slices([[1, 2, -1, 5]])
-      table = contrib_lookup.HashTable(
-          initializer=contrib_lookup.KeyValueTensorInitializer(
+      try:
+        # Dynamically try to load the tf v2 lookup, falling back to contrib
+        lookup = tf.compat.v2.lookup
+        hash_table_class = tf.compat.v2.lookup.StaticHashTable
+      except AttributeError:
+        lookup = contrib_lookup
+        hash_table_class = contrib_lookup.HashTable
+      table = hash_table_class(
+          initializer=lookup.KeyValueTensorInitializer(
               keys=keys, values=list(reversed(keys))),
           default_value=100)
       dataset = dataset.map(table.lookup)
@@ -546,6 +555,88 @@ class ReadDatasetTest(test_case.TestCase):
 
     result = self.execute(graph_fn, [])
     self.assertAllEqual(result, [-1, 100, 1, 100])
+
+  def test_read_dataset_sample_from_datasets_weights_equal_weight(self):
+    """Ensure that the files' values are equally-weighted."""
+    config = input_reader_pb2.InputReader()
+    config.num_readers = 2
+    config.shuffle = False
+    config.sample_from_datasets_weights.extend([0.5, 0.5])
+
+    def graph_fn():
+      return self._get_dataset_next(
+          [self._path_template % '0', self._path_template % '1'],
+          config,
+          batch_size=1000)
+
+    data = list(self.execute(graph_fn, []))
+    self.assertEqual(len(data), 1000)
+    self._assert_item_count(data, 1, 0.25)
+    self._assert_item_count(data, 10, 0.25)
+    self._assert_item_count(data, 2, 0.25)
+    self._assert_item_count(data, 20, 0.25)
+
+  def test_read_dataset_sample_from_datasets_weights_non_normalized(self):
+    """Ensure that the values are equally-weighted when not normalized."""
+    config = input_reader_pb2.InputReader()
+    config.num_readers = 2
+    config.shuffle = False
+    # Values are not normalized to sum to 1. In this case, it's a 50/50 split
+    # with each dataset having weight of 1.
+    config.sample_from_datasets_weights.extend([1, 1])
+
+    def graph_fn():
+      return self._get_dataset_next(
+          [self._path_template % '0', self._path_template % '1'],
+          config,
+          batch_size=1000)
+
+    data = list(self.execute(graph_fn, []))
+    self.assertEqual(len(data), 1000)
+    self._assert_item_count(data, 1, 0.25)
+    self._assert_item_count(data, 10, 0.25)
+    self._assert_item_count(data, 2, 0.25)
+    self._assert_item_count(data, 20, 0.25)
+
+  def test_read_dataset_sample_from_datasets_weights_zero_weight(self):
+    """Ensure that the files' values are equally-weighted."""
+    config = input_reader_pb2.InputReader()
+    config.num_readers = 2
+    config.shuffle = False
+    config.sample_from_datasets_weights.extend([1.0, 0.0])
+
+    def graph_fn():
+      return self._get_dataset_next(
+          [self._path_template % '0', self._path_template % '1'],
+          config,
+          batch_size=1000)
+
+    data = list(self.execute(graph_fn, []))
+    self.assertEqual(len(data), 1000)
+    self._assert_item_count(data, 1, 0.5)
+    self._assert_item_count(data, 10, 0.5)
+    self._assert_item_count(data, 2, 0.0)
+    self._assert_item_count(data, 20, 0.0)
+
+  def test_read_dataset_sample_from_datasets_weights_unbalanced(self):
+    """Ensure that the files' values are equally-weighted."""
+    config = input_reader_pb2.InputReader()
+    config.num_readers = 2
+    config.shuffle = False
+    config.sample_from_datasets_weights.extend([0.1, 0.9])
+
+    def graph_fn():
+      return self._get_dataset_next(
+          [self._path_template % '0', self._path_template % '1'],
+          config,
+          batch_size=1000)
+
+    data = list(self.execute(graph_fn, []))
+    self.assertEqual(len(data), 1000)
+    self._assert_item_count(data, 1, 0.05)
+    self._assert_item_count(data, 10, 0.05)
+    self._assert_item_count(data, 2, 0.45)
+    self._assert_item_count(data, 20, 0.45)
 
   def test_read_dataset(self):
     config = input_reader_pb2.InputReader()
@@ -559,7 +650,7 @@ class ReadDatasetTest(test_case.TestCase):
     data = self.execute(graph_fn, [])
     # Note that the execute function extracts single outputs if the return
     # value is of size 1.
-    self.assertAllEqual(
+    self.assertCountEqual(
         data, [
             1, 10, 2, 20, 3, 30, 4, 40, 5, 50, 1, 10, 2, 20, 3, 30, 4, 40, 5,
             50
@@ -577,7 +668,7 @@ class ReadDatasetTest(test_case.TestCase):
     data = self.execute(graph_fn, [])
     # Note that the execute function extracts single outputs if the return
     # value is of size 1.
-    self.assertAllEqual(
+    self.assertCountEqual(
         data, [
             1, 10, 2, 20, 3, 30, 4, 40, 5, 50, 1, 10, 2, 20, 3, 30, 4, 40, 5,
             50
@@ -607,12 +698,14 @@ class ReadDatasetTest(test_case.TestCase):
     def graph_fn():
       return self._get_dataset_next(
           [self._shuffle_path_template % '*'], config, batch_size=10)
-    expected_non_shuffle_output = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+    expected_non_shuffle_output1 = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+    expected_non_shuffle_output2 = [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]
 
     # Note that the execute function extracts single outputs if the return
     # value is of size 1.
     data = self.execute(graph_fn, [])
-    self.assertAllEqual(data, expected_non_shuffle_output)
+    self.assertTrue(all(data == expected_non_shuffle_output1) or
+                    all(data == expected_non_shuffle_output2))
 
   def test_read_dataset_single_epoch(self):
     config = input_reader_pb2.InputReader()

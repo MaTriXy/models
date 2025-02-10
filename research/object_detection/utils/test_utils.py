@@ -101,6 +101,10 @@ class MockKerasBoxPredictor(box_predictor.KerasBoxPredictor):
         is_training, num_classes, False, False)
     self._add_background_class = add_background_class
 
+    # Dummy variable so that box predictor registers some variables.
+    self._dummy_var = tf.Variable(0.0, trainable=True,
+                                  name='box_predictor_var')
+
   def _predict(self, image_features, **kwargs):
     image_feature = image_features[0]
     combined_feature_shape = shape_utils.combined_static_and_dynamic_shape(
@@ -271,3 +275,19 @@ class GraphContextOrNone(object):
       return False
     else:
       return self.graph.__exit__(ttype, value, traceback)
+
+
+def image_with_dynamic_shape(height, width, channels):
+  """Returns a single image with dynamic shape."""
+  h = tf.random.uniform([], minval=height, maxval=height+1, dtype=tf.int32)
+  w = tf.random.uniform([], minval=width, maxval=width+1, dtype=tf.int32)
+  image = tf.random.uniform([h, w, channels])
+  return image
+
+
+def keypoints_with_dynamic_shape(num_instances, num_keypoints, num_coordinates):
+  """Returns keypoints with dynamic shape."""
+  n = tf.random.uniform([], minval=num_instances, maxval=num_instances+1,
+                        dtype=tf.int32)
+  keypoints = tf.random.uniform([n, num_keypoints, num_coordinates])
+  return keypoints

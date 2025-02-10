@@ -19,7 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-
+import unittest
 from six.moves import range
 import tensorflow.compat.v1 as tf
 
@@ -32,6 +32,7 @@ from object_detection.protos import model_pb2
 from object_detection.protos import pipeline_pb2
 from object_detection.protos import train_pb2
 from object_detection.utils import config_util
+from object_detection.utils import tf_version
 
 # pylint: disable=g-import-not-at-top
 try:
@@ -282,18 +283,22 @@ class ConfigUtilTest(tf.test.TestCase):
     self.assertAlmostEqual(hparams.learning_rate * warmup_scale_factor,
                            cosine_lr.warmup_learning_rate)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testRMSPropWithNewLearingRate(self):
     """Tests new learning rates for RMSProp Optimizer."""
     self._assertOptimizerWithNewLearningRate("rms_prop_optimizer")
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testMomentumOptimizerWithNewLearningRate(self):
     """Tests new learning rates for Momentum Optimizer."""
     self._assertOptimizerWithNewLearningRate("momentum_optimizer")
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testAdamOptimizerWithNewLearningRate(self):
     """Tests new learning rates for Adam Optimizer."""
     self._assertOptimizerWithNewLearningRate("adam_optimizer")
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testGenericConfigOverride(self):
     """Tests generic config overrides for all top-level configs."""
     # Set one parameter for each of the top-level pipeline configs:
@@ -329,6 +334,7 @@ class ConfigUtilTest(tf.test.TestCase):
     self.assertEqual(2,
                      configs["graph_rewriter_config"].quantization.weight_bits)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testNewBatchSize(self):
     """Tests that batch size is updated appropriately."""
     original_batch_size = 2
@@ -344,6 +350,7 @@ class ConfigUtilTest(tf.test.TestCase):
     new_batch_size = configs["train_config"].batch_size
     self.assertEqual(16, new_batch_size)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testNewBatchSizeWithClipping(self):
     """Tests that batch size is clipped to 1 from below."""
     original_batch_size = 2
@@ -359,6 +366,7 @@ class ConfigUtilTest(tf.test.TestCase):
     new_batch_size = configs["train_config"].batch_size
     self.assertEqual(1, new_batch_size)  # Clipped to 1.0.
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testOverwriteBatchSizeWithKeyValue(self):
     """Tests that batch size is overwritten based on key/value."""
     pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
@@ -369,6 +377,46 @@ class ConfigUtilTest(tf.test.TestCase):
     new_batch_size = configs["train_config"].batch_size
     self.assertEqual(10, new_batch_size)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
+  def testOverwriteSampleFromDatasetWeights(self):
+    """Tests config override for sample_from_datasets_weights."""
+    pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
+    pipeline_config.train_input_reader.sample_from_datasets_weights.extend(
+        [1, 2])
+    pipeline_config_path = os.path.join(self.get_temp_dir(), "pipeline.config")
+    _write_config(pipeline_config, pipeline_config_path)
+
+    # Override parameters:
+    configs = config_util.get_configs_from_pipeline_file(pipeline_config_path)
+    hparams = contrib_training.HParams(sample_from_datasets_weights=[0.5, 0.5])
+    configs = config_util.merge_external_params_with_configs(configs, hparams)
+
+    # Ensure that the parameters have the overridden values:
+    self.assertListEqual(
+        [0.5, 0.5],
+        list(configs["train_input_config"].sample_from_datasets_weights))
+
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
+  def testOverwriteSampleFromDatasetWeightsWrongLength(self):
+    """Tests config override for sample_from_datasets_weights."""
+    pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
+    pipeline_config.train_input_reader.sample_from_datasets_weights.extend(
+        [1, 2])
+    pipeline_config_path = os.path.join(self.get_temp_dir(), "pipeline.config")
+    _write_config(pipeline_config, pipeline_config_path)
+
+    # Try to override parameter with too many weights:
+    configs = config_util.get_configs_from_pipeline_file(pipeline_config_path)
+    hparams = contrib_training.HParams(
+        sample_from_datasets_weights=[0.5, 0.5, 0.5])
+    with self.assertRaises(
+        ValueError,
+        msg="sample_from_datasets_weights override has a different number of"
+        " values (3) than the configured dataset weights (2)."
+    ):
+      config_util.merge_external_params_with_configs(configs, hparams)
+
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testKeyValueOverrideBadKey(self):
     """Tests that overwriting with a bad key causes an exception."""
     pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
@@ -377,6 +425,7 @@ class ConfigUtilTest(tf.test.TestCase):
     with self.assertRaises(ValueError):
       config_util.merge_external_params_with_configs(configs, hparams)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testOverwriteBatchSizeWithBadValueType(self):
     """Tests that overwriting with a bad valuye type causes an exception."""
     pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
@@ -387,6 +436,7 @@ class ConfigUtilTest(tf.test.TestCase):
     with self.assertRaises(TypeError):
       config_util.merge_external_params_with_configs(configs, hparams)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testNewMomentumOptimizerValue(self):
     """Tests that new momentum value is updated appropriately."""
     original_momentum_value = 0.4
@@ -404,6 +454,7 @@ class ConfigUtilTest(tf.test.TestCase):
     new_momentum_value = optimizer_config.momentum_optimizer_value
     self.assertAlmostEqual(1.0, new_momentum_value)  # Clipped to 1.0.
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testNewClassificationLocalizationWeightRatio(self):
     """Tests that the loss weight ratio is updated appropriately."""
     original_localization_weight = 0.1
@@ -426,6 +477,7 @@ class ConfigUtilTest(tf.test.TestCase):
     self.assertAlmostEqual(1.0, loss.localization_weight)
     self.assertAlmostEqual(new_weight_ratio, loss.classification_weight)
 
+  @unittest.skipIf(tf_version.is_tf2(), "Skipping TF1.X only test.")
   def testNewFocalLossParameters(self):
     """Tests that the loss weight ratio is updated appropriately."""
     original_alpha = 1.0
@@ -933,7 +985,7 @@ class ConfigUtilTest(tf.test.TestCase):
 
     self.assertEqual(config_util.get_number_of_classes(configs["model"]), 2)
 
-  def testRemoveUnecessaryEma(self):
+  def testRemoveUnnecessaryEma(self):
     input_dict = {
         "expanded_conv_10/project/act_quant/min":
             1,
@@ -964,7 +1016,68 @@ class ConfigUtilTest(tf.test.TestCase):
 
     self.assertEqual(
         output_dict,
-        config_util.remove_unecessary_ema(input_dict, no_ema_collection))
+        config_util.remove_unnecessary_ema(input_dict, no_ema_collection))
+
+  def testUpdateRescoreInstances(self):
+    pipeline_config_path = os.path.join(self.get_temp_dir(), "pipeline.config")
+    pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
+    kpt_task = pipeline_config.model.center_net.keypoint_estimation_task.add()
+    kpt_task.rescore_instances = True
+
+    _write_config(pipeline_config, pipeline_config_path)
+
+    configs = config_util.get_configs_from_pipeline_file(pipeline_config_path)
+    cn_config = configs["model"].center_net
+    self.assertEqual(
+        True, cn_config.keypoint_estimation_task[0].rescore_instances)
+
+    config_util.merge_external_params_with_configs(
+        configs, kwargs_dict={"rescore_instances": False})
+    cn_config = configs["model"].center_net
+    self.assertEqual(
+        False, cn_config.keypoint_estimation_task[0].rescore_instances)
+
+  def testUpdateRescoreInstancesWithBooleanString(self):
+    pipeline_config_path = os.path.join(self.get_temp_dir(), "pipeline.config")
+    pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
+    kpt_task = pipeline_config.model.center_net.keypoint_estimation_task.add()
+    kpt_task.rescore_instances = True
+
+    _write_config(pipeline_config, pipeline_config_path)
+
+    configs = config_util.get_configs_from_pipeline_file(pipeline_config_path)
+    cn_config = configs["model"].center_net
+    self.assertEqual(
+        True, cn_config.keypoint_estimation_task[0].rescore_instances)
+
+    config_util.merge_external_params_with_configs(
+        configs, kwargs_dict={"rescore_instances": "False"})
+    cn_config = configs["model"].center_net
+    self.assertEqual(
+        False, cn_config.keypoint_estimation_task[0].rescore_instances)
+
+  def testUpdateRescoreInstancesWithMultipleTasks(self):
+    pipeline_config_path = os.path.join(self.get_temp_dir(), "pipeline.config")
+    pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
+    kpt_task = pipeline_config.model.center_net.keypoint_estimation_task.add()
+    kpt_task.rescore_instances = True
+    kpt_task = pipeline_config.model.center_net.keypoint_estimation_task.add()
+    kpt_task.rescore_instances = True
+
+    _write_config(pipeline_config, pipeline_config_path)
+
+    configs = config_util.get_configs_from_pipeline_file(pipeline_config_path)
+    cn_config = configs["model"].center_net
+    self.assertEqual(
+        True, cn_config.keypoint_estimation_task[0].rescore_instances)
+
+    config_util.merge_external_params_with_configs(
+        configs, kwargs_dict={"rescore_instances": False})
+    cn_config = configs["model"].center_net
+    self.assertEqual(
+        True, cn_config.keypoint_estimation_task[0].rescore_instances)
+    self.assertEqual(
+        True, cn_config.keypoint_estimation_task[1].rescore_instances)
 
 
 if __name__ == "__main__":

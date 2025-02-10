@@ -216,7 +216,7 @@ def draw_bounding_box_on_image(image,
   # If the total height of the display strings added to the top of the bounding
   # box exceeds the top of the image, stack the strings below the bounding box
   # instead of above.
-  display_str_heights = [font.getsize(ds)[1] for ds in display_str_list]
+  display_str_heights = [font.getbbox(ds)[3] for ds in display_str_list]
   # Each display_str has a top and bottom margin of 0.05x.
   total_display_str_height = (1 + 2 * 0.05) * sum(display_str_heights)
 
@@ -226,7 +226,8 @@ def draw_bounding_box_on_image(image,
     text_bottom = bottom + total_display_str_height
   # Reverse list and print from bottom to top.
   for display_str in display_str_list[::-1]:
-    text_width, text_height = font.getsize(display_str)
+    bbox = font.getbbox(display_str)
+    text_width, text_height = bbox[2], bbox[3]
     margin = np.ceil(0.05 * text_height)
     draw.rectangle(
         [(left, text_bottom - text_height - 2 * margin), (left + text_width,
@@ -664,6 +665,10 @@ def draw_side_by_side_evaluation_image(eval_dict,
           key != input_data_fields.image_additional_channels):
         eval_dict[key] = tf.expand_dims(eval_dict[key], 0)
 
+  num_gt_boxes = [-1] * eval_dict[input_data_fields.original_image].shape[0]
+  if input_data_fields.num_groundtruth_boxes in eval_dict:
+    num_gt_boxes = tf.cast(eval_dict[input_data_fields.num_groundtruth_boxes],
+                           tf.int32)
   for indx in range(eval_dict[input_data_fields.original_image].shape[0]):
     instance_masks = None
     if detection_fields.detection_masks in eval_dict:
@@ -680,8 +685,10 @@ def draw_side_by_side_evaluation_image(eval_dict,
         keypoint_scores = tf.expand_dims(
             eval_dict[detection_fields.detection_keypoint_scores][indx], axis=0)
       else:
-        keypoint_scores = tf.cast(keypoint_ops.set_keypoint_visibilities(
-            keypoints), dtype=tf.float32)
+        keypoint_scores = tf.expand_dims(tf.cast(
+            keypoint_ops.set_keypoint_visibilities(
+                eval_dict[detection_fields.detection_keypoints][indx]),
+            dtype=tf.float32), axis=0)
 
     groundtruth_instance_masks = None
     if input_data_fields.groundtruth_instance_masks in eval_dict:
@@ -699,10 +706,10 @@ def draw_side_by_side_evaluation_image(eval_dict,
         groundtruth_keypoint_scores = tf.expand_dims(
             tf.cast(eval_dict[gt_kpt_vis_fld][indx], dtype=tf.float32), axis=0)
       else:
-        groundtruth_keypoint_scores = tf.cast(
+        groundtruth_keypoint_scores = tf.expand_dims(tf.cast(
             keypoint_ops.set_keypoint_visibilities(
-                groundtruth_keypoints), dtype=tf.float32)
-
+                eval_dict[input_data_fields.groundtruth_keypoints][indx]),
+            dtype=tf.float32), axis=0)
     images_with_detections = draw_bounding_boxes_on_image_tensors(
         tf.expand_dims(
             eval_dict[input_data_fields.original_image][indx], axis=0),
@@ -725,16 +732,23 @@ def draw_side_by_side_evaluation_image(eval_dict,
         max_boxes_to_draw=max_boxes_to_draw,
         min_score_thresh=min_score_thresh,
         use_normalized_coordinates=use_normalized_coordinates)
+    num_gt_boxes_i = num_gt_boxes[indx]
     images_with_groundtruth = draw_bounding_boxes_on_image_tensors(
         tf.expand_dims(
-            eval_dict[input_data_fields.original_image][indx], axis=0),
+            eval_dict[input_data_fields.original_image][indx],
+            axis=0),
         tf.expand_dims(
-            eval_dict[input_data_fields.groundtruth_boxes][indx], axis=0),
+            eval_dict[input_data_fields.groundtruth_boxes][indx]
+            [:num_gt_boxes_i],
+            axis=0),
         tf.expand_dims(
-            eval_dict[input_data_fields.groundtruth_classes][indx], axis=0),
+            eval_dict[input_data_fields.groundtruth_classes][indx]
+            [:num_gt_boxes_i],
+            axis=0),
         tf.expand_dims(
             tf.ones_like(
-                eval_dict[input_data_fields.groundtruth_classes][indx],
+                eval_dict[input_data_fields.groundtruth_classes][indx]
+                [:num_gt_boxes_i],
                 dtype=tf.float32),
             axis=0),
         category_index,
@@ -760,13 +774,17 @@ def draw_side_by_side_evaluation_image(eval_dict,
                   eval_dict[input_data_fields.image_additional_channels][indx],
                   axis=0),
               tf.expand_dims(
-                  eval_dict[input_data_fields.groundtruth_boxes][indx], axis=0),
+                  eval_dict[input_data_fields.groundtruth_boxes][indx]
+                  [:num_gt_boxes_i],
+                  axis=0),
               tf.expand_dims(
-                  eval_dict[input_data_fields.groundtruth_classes][indx],
+                  eval_dict[input_data_fields.groundtruth_classes][indx]
+                  [:num_gt_boxes_i],
                   axis=0),
               tf.expand_dims(
                   tf.ones_like(
-                      eval_dict[input_data_fields.groundtruth_classes][indx],
+                      eval_dict[input_data_fields.groundtruth_classes][indx]
+                      [num_gt_boxes_i],
                       dtype=tf.float32),
                   axis=0),
               category_index,
@@ -787,6 +805,81 @@ def draw_side_by_side_evaluation_image(eval_dict,
           axis=2)
     images_with_detections_list.append(images_to_visualize)
 
+  return images_with_detections_list
+
+
+def draw_densepose_visualizations(eval_dict,
+                                  max_boxes_to_draw=20,
+                                  min_score_thresh=0.2,
+                                  num_parts=24,
+                                  dp_coord_to_visualize=0):
+  """Draws DensePose visualizations.
+
+  Args:
+    eval_dict: The evaluation dictionary returned by
+      eval_util.result_dict_for_batched_example().
+    max_boxes_to_draw: The maximum number of boxes to draw for detections.
+    min_score_thresh: The minimum score threshold for showing detections.
+    num_parts: The number of different densepose parts.
+    dp_coord_to_visualize: Whether to visualize v-coordinates (0) or
+      u-coordinates (0) overlaid on the person masks.
+
+  Returns:
+    A list of [1, H, W, C] uint8 tensor, each element corresponding to an image
+    in the batch.
+
+  Raises:
+    ValueError: If `dp_coord_to_visualize` is not 0 or 1.
+  """
+  if dp_coord_to_visualize not in (0, 1):
+    raise ValueError('`dp_coord_to_visualize` must be either 0 for v '
+                     'coordinates), or 1 for u coordinates, but instead got '
+                     '{}'.format(dp_coord_to_visualize))
+  detection_fields = fields.DetectionResultFields()
+  input_data_fields = fields.InputDataFields()
+
+  if detection_fields.detection_masks not in eval_dict:
+    raise ValueError('Expected `detection_masks` in `eval_dict`.')
+  if detection_fields.detection_surface_coords not in eval_dict:
+    raise ValueError('Expected `detection_surface_coords` in `eval_dict`.')
+
+  images_with_detections_list = []
+  for indx in range(eval_dict[input_data_fields.original_image].shape[0]):
+    # Note that detection masks have already been resized to the original image
+    # shapes, but `original_image` has not.
+    # TODO(ronnyvotel): Consider resizing `original_image` in
+    # eval_util.result_dict_for_batched_example().
+    true_shape = eval_dict[input_data_fields.true_image_shape][indx]
+    original_shape = eval_dict[
+        input_data_fields.original_image_spatial_shape][indx]
+    image = eval_dict[input_data_fields.original_image][indx]
+    image = shape_utils.pad_or_clip_nd(image, [true_shape[0], true_shape[1], 3])
+    image = _resize_original_image(image, original_shape)
+
+    scores = eval_dict[detection_fields.detection_scores][indx]
+    detection_masks = eval_dict[detection_fields.detection_masks][indx]
+    surface_coords = eval_dict[detection_fields.detection_surface_coords][indx]
+
+    def draw_densepose_py_func(image, detection_masks, surface_coords, scores):
+      """Overlays part masks and surface coords on original images."""
+      surface_coord_image = np.copy(image)
+      for i, (score, surface_coord, mask) in enumerate(
+          zip(scores, surface_coords, detection_masks)):
+        if i == max_boxes_to_draw:
+          break
+        if score > min_score_thresh:
+          draw_part_mask_on_image_array(image, mask, num_parts=num_parts)
+          draw_float_channel_on_image_array(
+              surface_coord_image, surface_coord[:, :, dp_coord_to_visualize],
+              mask)
+      return np.concatenate([image, surface_coord_image], axis=1)
+
+    image_with_densepose = tf.py_func(
+        draw_densepose_py_func,
+        [image, detection_masks, surface_coords, scores],
+        tf.uint8)
+    images_with_detections_list.append(
+        image_with_densepose[tf.newaxis, :, :, :])
   return images_with_detections_list
 
 
@@ -918,8 +1011,6 @@ def draw_mask_on_image_array(image, mask, color='red', alpha=0.4):
     raise ValueError('`image` not of type np.uint8')
   if mask.dtype != np.uint8:
     raise ValueError('`mask` not of type np.uint8')
-  if np.any(np.logical_and(mask != 1, mask != 0)):
-    raise ValueError('`mask` elements should be in [0, 1]')
   if image.shape[:2] != mask.shape:
     raise ValueError('The image has spatial dimensions %s but the mask has '
                      'dimensions %s' % (image.shape[:2], mask.shape))
@@ -929,8 +1020,82 @@ def draw_mask_on_image_array(image, mask, color='red', alpha=0.4):
   solid_color = np.expand_dims(
       np.ones_like(mask), axis=2) * np.reshape(list(rgb), [1, 1, 3])
   pil_solid_color = Image.fromarray(np.uint8(solid_color)).convert('RGBA')
-  pil_mask = Image.fromarray(np.uint8(255.0*alpha*mask)).convert('L')
+  pil_mask = Image.fromarray(np.uint8(255.0*alpha*(mask > 0))).convert('L')
   pil_image = Image.composite(pil_solid_color, pil_image, pil_mask)
+  np.copyto(image, np.array(pil_image.convert('RGB')))
+
+
+def draw_part_mask_on_image_array(image, mask, alpha=0.4, num_parts=24):
+  """Draws part mask on an image.
+
+  Args:
+    image: uint8 numpy array with shape (img_height, img_height, 3)
+    mask: a uint8 numpy array of shape (img_height, img_height) with
+      1-indexed parts (0 for background).
+    alpha: transparency value between 0 and 1 (default: 0.4)
+    num_parts: the maximum number of parts that may exist in the image (default
+      24 for DensePose).
+
+  Raises:
+    ValueError: On incorrect data type for image or masks.
+  """
+  if image.dtype != np.uint8:
+    raise ValueError('`image` not of type np.uint8')
+  if mask.dtype != np.uint8:
+    raise ValueError('`mask` not of type np.uint8')
+  if image.shape[:2] != mask.shape:
+    raise ValueError('The image has spatial dimensions %s but the mask has '
+                     'dimensions %s' % (image.shape[:2], mask.shape))
+
+  pil_image = Image.fromarray(image)
+  part_colors = np.zeros_like(image)
+  mask_1_channel = mask[:, :, np.newaxis]
+  for i, color in enumerate(STANDARD_COLORS[:num_parts]):
+    rgb = np.array(ImageColor.getrgb(color), dtype=np.uint8)
+    part_colors += (mask_1_channel == i + 1) * rgb[np.newaxis, np.newaxis, :]
+  pil_part_colors = Image.fromarray(np.uint8(part_colors)).convert('RGBA')
+  pil_mask = Image.fromarray(np.uint8(255.0 * alpha * (mask > 0))).convert('L')
+  pil_image = Image.composite(pil_part_colors, pil_image, pil_mask)
+  np.copyto(image, np.array(pil_image.convert('RGB')))
+
+
+def draw_float_channel_on_image_array(image, channel, mask, alpha=0.9,
+                                      cmap='YlGn'):
+  """Draws a floating point channel on an image array.
+
+  Args:
+    image: uint8 numpy array with shape (img_height, img_height, 3)
+    channel: float32 numpy array with shape (img_height, img_height). The values
+      should be in the range [0, 1], and will be mapped to colors using the
+      provided colormap `cmap` argument.
+    mask: a uint8 numpy array of shape (img_height, img_height) with
+      1-indexed parts (0 for background).
+    alpha: transparency value between 0 and 1 (default: 0.9)
+    cmap: string with the colormap to use.
+
+  Raises:
+    ValueError: On incorrect data type for image or masks.
+  """
+  if image.dtype != np.uint8:
+    raise ValueError('`image` not of type np.uint8')
+  if channel.dtype != np.float32:
+    raise ValueError('`channel` not of type np.float32')
+  if mask.dtype != np.uint8:
+    raise ValueError('`mask` not of type np.uint8')
+  if image.shape[:2] != channel.shape:
+    raise ValueError('The image has spatial dimensions %s but the channel has '
+                     'dimensions %s' % (image.shape[:2], channel.shape))
+  if image.shape[:2] != mask.shape:
+    raise ValueError('The image has spatial dimensions %s but the mask has '
+                     'dimensions %s' % (image.shape[:2], mask.shape))
+
+  cm = plt.get_cmap(cmap)
+  pil_image = Image.fromarray(image)
+  colored_channel = cm(channel)[:, :, :3]
+  pil_colored_channel = Image.fromarray(
+      np.uint8(colored_channel * 255)).convert('RGBA')
+  pil_mask = Image.fromarray(np.uint8(255.0 * alpha * (mask > 0))).convert('L')
+  pil_image = Image.composite(pil_colored_channel, pil_image, pil_mask)
   np.copyto(image, np.array(pil_image.convert('RGB')))
 
 
@@ -951,6 +1116,7 @@ def visualize_boxes_and_labels_on_image_array(
     min_score_thresh=.5,
     agnostic_mode=False,
     line_thickness=4,
+    mask_alpha=.4,
     groundtruth_box_visualization_color='black',
     skip_boxes=False,
     skip_scores=False,
@@ -973,8 +1139,8 @@ def visualize_boxes_and_labels_on_image_array(
       boxes and plot all boxes as black with no classes or scores.
     category_index: a dict containing category dictionaries (each holding
       category index `id` and category name `name`) keyed by category indices.
-    instance_masks: a numpy array of shape [N, image_height, image_width] with
-      values ranging between 0 and 1, can be None.
+    instance_masks: a uint8 numpy array of shape [N, image_height, image_width],
+      can be None.
     instance_boundaries: a numpy array of shape [N, image_height, image_width]
       with values ranging between 0 and 1, can be None.
     keypoints: a numpy array of shape [N, num_keypoints, 2], can
@@ -996,6 +1162,7 @@ def visualize_boxes_and_labels_on_image_array(
       class-agnostic mode or not.  This mode will display scores but ignore
       classes.
     line_thickness: integer (default: 4) controlling line width of the boxes.
+    mask_alpha: transparency value between 0 and 1 (default: 0.4).
     groundtruth_box_visualization_color: box color for visualizing groundtruth
       boxes
     skip_boxes: whether to skip the drawing of bounding boxes.
@@ -1071,7 +1238,8 @@ def visualize_boxes_and_labels_on_image_array(
       draw_mask_on_image_array(
           image,
           box_to_instance_masks_map[box],
-          color=color
+          color=color,
+          alpha=mask_alpha
       )
     if instance_boundaries is not None:
       draw_mask_on_image_array(
@@ -1127,7 +1295,7 @@ def add_cdf_image_summary(values, name):
     fraction_of_examples = (np.arange(cumulative_values.size, dtype=np.float32)
                             / cumulative_values.size)
     fig = plt.figure(frameon=False)
-    ax = fig.add_subplot('111')
+    ax = fig.add_subplot(1, 1, 1)
     ax.plot(fraction_of_examples, cumulative_values)
     ax.set_ylabel('cumulative normalized values')
     ax.set_xlabel('fraction of examples')
@@ -1154,7 +1322,7 @@ def add_hist_image_summary(values, bins, name):
   def hist_plot(values, bins):
     """Numpy function to plot hist."""
     fig = plt.figure(frameon=False)
-    ax = fig.add_subplot('111')
+    ax = fig.add_subplot(1, 1, 1)
     y, x = np.histogram(values, bins=bins)
     ax.plot(x[:-1], y)
     ax.set_ylabel('count')

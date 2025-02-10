@@ -1,5 +1,4 @@
-# Lint as: python3
-# Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2024 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,81 +11,105 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Masked language task."""
+
 import dataclasses
-import tensorflow as tf
+import tensorflow as tf, tf_keras
 
 from official.core import base_task
-from official.modeling.hyperparams import config_definitions as cfg
+from official.core import config_definitions as cfg
+from official.core import task_factory
+from official.modeling import tf_utils
 from official.nlp.configs import bert
-from official.nlp.data import pretrain_dataloader
-from official.nlp.modeling import losses as loss_lib
+from official.nlp.configs import encoders
+from official.nlp.data import data_loader_factory
+from official.nlp.modeling import layers
+from official.nlp.modeling import models
 
 
 @dataclasses.dataclass
 class MaskedLMConfig(cfg.TaskConfig):
   """The model config."""
-  network: bert.BertPretrainerConfig = bert.BertPretrainerConfig(cls_heads=[
-      bert.ClsHeadConfig(
-          inner_dim=768, num_classes=2, dropout_rate=0.1, name='next_sentence')
-  ])
-  train_data: cfg.DataConfig = cfg.DataConfig()
-  validation_data: cfg.DataConfig = cfg.DataConfig()
+  model: bert.PretrainerConfig = dataclasses.field(
+      default_factory=lambda: bert.PretrainerConfig(  # pylint: disable=g-long-lambda
+          cls_heads=[
+              bert.ClsHeadConfig(
+                  inner_dim=768,
+                  num_classes=2,
+                  dropout_rate=0.1,
+                  name='next_sentence',
+              )
+          ]
+      )
+  )
+  # TODO(b/154564893): Mathematically, scale_loss should be True.
+  # However, it works better with scale_loss being False.
+  scale_loss: bool = False
+  train_data: cfg.DataConfig = dataclasses.field(default_factory=cfg.DataConfig)
+  validation_data: cfg.DataConfig = dataclasses.field(
+      default_factory=cfg.DataConfig
+  )
 
 
-class MaskedLMAccuracy(tf.keras.metrics.Mean):
-  """The weighted accuracy metric for the masked language model."""
-
-  def __init__(self, name=None, dtype=None):
-    super(MaskedLMAccuracy, self).__init__(name=name, dtype=dtype)
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    masked_lm_accuracy = tf.keras.metrics.sparse_categorical_accuracy(
-        y_true, y_pred)
-    numerator = tf.reduce_sum(masked_lm_accuracy * sample_weight)
-    denominator = tf.reduce_sum(sample_weight) + 1e-5
-    masked_lm_accuracy = numerator / denominator
-    return super(MaskedLMAccuracy, self).update_state(masked_lm_accuracy)
-
-
-@base_task.register_task_cls(MaskedLMConfig)
+@task_factory.register_task_cls(MaskedLMConfig)
 class MaskedLMTask(base_task.Task):
-  """Mock task object for testing."""
+  """Task object for Mask language modeling."""
 
-  def build_model(self):
-    return bert.instantiate_from_cfg(self.task_config.network)
+  def _build_encoder(self, encoder_cfg):
+    return encoders.build_encoder(encoder_cfg)
+
+  def build_model(self, params=None):
+    config = params or self.task_config.model
+    encoder_cfg = config.encoder
+    encoder_network = self._build_encoder(encoder_cfg)
+    cls_heads = [
+        layers.ClassificationHead(**cfg.as_dict()) for cfg in config.cls_heads
+    ] if config.cls_heads else []
+    return models.BertPretrainerV2(
+        mlm_activation=tf_utils.get_activation(config.mlm_activation),
+        mlm_initializer=tf_keras.initializers.TruncatedNormal(
+            stddev=config.mlm_initializer_range),
+        encoder_network=encoder_network,
+        classification_heads=cls_heads)
 
   def build_losses(self,
-                   features,
+                   labels,
                    model_outputs,
                    metrics,
                    aux_losses=None) -> tf.Tensor:
-    metrics = dict([(metric.name, metric) for metric in metrics])
-    lm_output = tf.nn.log_softmax(model_outputs['lm_output'], axis=-1)
-    mlm_loss = loss_lib.weighted_sparse_categorical_crossentropy_loss(
-        labels=features['masked_lm_ids'],
-        predictions=lm_output,
-        weights=features['masked_lm_weights'])
-    metrics['lm_example_loss'].update_state(mlm_loss)
-    if 'next_sentence_labels' in features:
-      sentence_labels = features['next_sentence_labels']
-      sentence_loss = loss_lib.weighted_sparse_categorical_crossentropy_loss(
-          labels=sentence_labels,
-          predictions=tf.nn.log_softmax(
-              model_outputs['next_sentence'], axis=-1))
-      metrics['next_sentence_loss'].update_state(sentence_loss)
-      total_loss = mlm_loss + sentence_loss
-    else:
-      total_loss = mlm_loss
+    with tf.name_scope('MaskedLMTask/losses'):
+      metrics = dict([(metric.name, metric) for metric in metrics])
+      lm_prediction_losses = tf_keras.losses.sparse_categorical_crossentropy(
+          labels['masked_lm_ids'],
+          tf.cast(model_outputs['mlm_logits'], tf.float32),
+          from_logits=True)
+      lm_label_weights = labels['masked_lm_weights']
+      lm_numerator_loss = tf.reduce_sum(lm_prediction_losses *
+                                        lm_label_weights)
+      lm_denominator_loss = tf.reduce_sum(lm_label_weights)
+      mlm_loss = tf.math.divide_no_nan(lm_numerator_loss, lm_denominator_loss)
+      metrics['lm_example_loss'].update_state(mlm_loss)
+      if 'next_sentence_labels' in labels:
+        sentence_labels = labels['next_sentence_labels']
+        sentence_outputs = tf.cast(
+            model_outputs['next_sentence'], dtype=tf.float32)
+        sentence_loss = tf.reduce_mean(
+            tf_keras.losses.sparse_categorical_crossentropy(
+                sentence_labels, sentence_outputs, from_logits=True))
+        metrics['next_sentence_loss'].update_state(sentence_loss)
+        total_loss = mlm_loss + sentence_loss
+      else:
+        total_loss = mlm_loss
 
-    if aux_losses:
-      total_loss += tf.add_n(aux_losses)
-    return total_loss
+      if aux_losses:
+        total_loss += tf.add_n(aux_losses)
+      return total_loss
 
   def build_inputs(self, params, input_context=None):
     """Returns tf.data.Dataset for pretraining."""
     if params.input_path == 'dummy':
+
       def dummy_data(_):
         dummy_ids = tf.zeros((1, params.seq_length), dtype=tf.int32)
         dummy_lm = tf.zeros((1, params.max_predictions_per_seq), dtype=tf.int32)
@@ -105,35 +128,35 @@ class MaskedLMTask(base_task.Task):
           dummy_data, num_parallel_calls=tf.data.experimental.AUTOTUNE)
       return dataset
 
-    return pretrain_dataloader.BertPretrainDataLoader(params).load(
-        input_context)
+    return data_loader_factory.get_data_loader(params).load(input_context)
 
   def build_metrics(self, training=None):
     del training
     metrics = [
-        MaskedLMAccuracy(name='masked_lm_accuracy'),
-        tf.keras.metrics.Mean(name='lm_example_loss')
+        tf_keras.metrics.SparseCategoricalAccuracy(name='masked_lm_accuracy'),
+        tf_keras.metrics.Mean(name='lm_example_loss')
     ]
     # TODO(hongkuny): rethink how to manage metrics creation with heads.
     if self.task_config.train_data.use_next_sentence_label:
       metrics.append(
-          tf.keras.metrics.SparseCategoricalAccuracy(
+          tf_keras.metrics.SparseCategoricalAccuracy(
               name='next_sentence_accuracy'))
-      metrics.append(tf.keras.metrics.Mean(name='next_sentence_loss'))
+      metrics.append(tf_keras.metrics.Mean(name='next_sentence_loss'))
     return metrics
 
-  def process_metrics(self, metrics, inputs, outputs):
-    metrics = dict([(metric.name, metric) for metric in metrics])
-    if 'masked_lm_accuracy' in metrics:
-      metrics['masked_lm_accuracy'].update_state(inputs['masked_lm_ids'],
-                                                 outputs['lm_output'],
-                                                 inputs['masked_lm_weights'])
-    if 'next_sentence_accuracy' in metrics:
-      metrics['next_sentence_accuracy'].update_state(
-          inputs['next_sentence_labels'], outputs['next_sentence'])
+  def process_metrics(self, metrics, labels, model_outputs):
+    with tf.name_scope('MaskedLMTask/process_metrics'):
+      metrics = dict([(metric.name, metric) for metric in metrics])
+      if 'masked_lm_accuracy' in metrics:
+        metrics['masked_lm_accuracy'].update_state(
+            labels['masked_lm_ids'], model_outputs['mlm_logits'],
+            labels['masked_lm_weights'])
+      if 'next_sentence_accuracy' in metrics:
+        metrics['next_sentence_accuracy'].update_state(
+            labels['next_sentence_labels'], model_outputs['next_sentence'])
 
-  def train_step(self, inputs, model: tf.keras.Model,
-                 optimizer: tf.keras.optimizers.Optimizer, metrics):
+  def train_step(self, inputs, model: tf_keras.Model,
+                 optimizer: tf_keras.optimizers.Optimizer, metrics):
     """Does forward and backward.
 
     Args:
@@ -149,21 +172,24 @@ class MaskedLMTask(base_task.Task):
       outputs = model(inputs, training=True)
       # Computes per-replica loss.
       loss = self.build_losses(
-          features=inputs,
+          labels=inputs,
           model_outputs=outputs,
           metrics=metrics,
           aux_losses=model.losses)
-      # Scales loss as the default gradients allreduce performs sum inside the
-      # optimizer.
-      # TODO(b/154564893): enable loss scaling.
-      # scaled_loss = loss / tf.distribute.get_strategy().num_replicas_in_sync
+      if self.task_config.scale_loss:
+        # Scales loss as the default gradients allreduce performs sum inside the
+        # optimizer.
+        scaled_loss = loss / tf.distribute.get_strategy().num_replicas_in_sync
     tvars = model.trainable_variables
-    grads = tape.gradient(loss, tvars)
+    if self.task_config.scale_loss:
+      grads = tape.gradient(scaled_loss, tvars)
+    else:
+      grads = tape.gradient(loss, tvars)
     optimizer.apply_gradients(list(zip(grads, tvars)))
     self.process_metrics(metrics, inputs, outputs)
     return {self.loss: loss}
 
-  def validation_step(self, inputs, model: tf.keras.Model, metrics):
+  def validation_step(self, inputs, model: tf_keras.Model, metrics):
     """Validatation step.
 
     Args:
@@ -176,7 +202,7 @@ class MaskedLMTask(base_task.Task):
     """
     outputs = self.inference_step(inputs, model)
     loss = self.build_losses(
-        features=inputs,
+        labels=inputs,
         model_outputs=outputs,
         metrics=metrics,
         aux_losses=model.losses)

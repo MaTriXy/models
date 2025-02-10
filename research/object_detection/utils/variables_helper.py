@@ -21,12 +21,26 @@ from __future__ import division
 from __future__ import print_function
 
 import logging
+import os
 import re
 
 import tensorflow.compat.v1 as tf
 import tf_slim as slim
 
 from tensorflow.python.ops import variables as tf_variables
+
+
+# Maps checkpoint types to variable name prefixes that are no longer
+# supported
+DETECTION_FEATURE_EXTRACTOR_MSG = """\
+The checkpoint type 'detection' is not supported when it contains variable
+names with 'feature_extractor'. Please download the new checkpoint file
+from model zoo.
+"""
+
+DEPRECATED_CHECKPOINT_MAP = {
+    'detection': ('feature_extractor', DETECTION_FEATURE_EXTRACTOR_MSG)
+}
 
 
 # TODO(derekjchow): Consider replacing with tf.contrib.filter_variables in
@@ -47,8 +61,6 @@ def filter_variables(variables, filter_regex_list, invert=False):
   Returns:
     a list of filtered variables.
   """
-  if tf.executing_eagerly():
-    raise ValueError('Accessing variables is not supported in eager mode.')
   kept_vars = []
   variables_to_ignore_patterns = list([fre for fre in filter_regex_list if fre])
   for var in variables:
@@ -74,8 +86,6 @@ def multiply_gradients_matching_regex(grads_and_vars, regex_list, multiplier):
   Returns:
     grads_and_vars: A list of gradient to variable pairs (tuples).
   """
-  if tf.executing_eagerly():
-    raise ValueError('Accessing variables is not supported in eager mode.')
   variables = [pair[1] for pair in grads_and_vars]
   matching_vars = filter_variables(variables, regex_list, invert=True)
   for var in matching_vars:
@@ -97,8 +107,6 @@ def freeze_gradients_matching_regex(grads_and_vars, regex_list):
     grads_and_vars: A list of gradient to variable pairs (tuples) that do not
       contain the variables and gradients matching the regex.
   """
-  if tf.executing_eagerly():
-    raise ValueError('Accessing variables is not supported in eager mode.')
   variables = [pair[1] for pair in grads_and_vars]
   matching_vars = filter_variables(variables, regex_list, invert=True)
   kept_grads_and_vars = [pair for pair in grads_and_vars
@@ -129,8 +137,6 @@ def get_variables_available_in_checkpoint(variables,
   Raises:
     ValueError: if `variables` is not a list or dict.
   """
-  if tf.executing_eagerly():
-    raise ValueError('Accessing variables is not supported in eager mode.')
   if isinstance(variables, list):
     variable_names_map = {}
     for variable in variables:
@@ -178,11 +184,47 @@ def get_global_variables_safely():
   Returns:
     The result of tf.global_variables()
   """
-  if tf.executing_eagerly():
-    raise ValueError('Accessing variables is not supported in eager mode.')
   with tf.init_scope():
     if tf.executing_eagerly():
       raise ValueError("Global variables collection is not tracked when "
                        "executing eagerly. Use a Keras model's `.variables` "
                        "attribute instead.")
   return tf.global_variables()
+
+
+def ensure_checkpoint_supported(checkpoint_path, checkpoint_type, model_dir):
+  """Ensures that the given checkpoint can be properly loaded.
+
+  Performs the following checks
+  1. Raises an error if checkpoint_path and model_dir are same.
+  2. Checks that checkpoint_path does not contain a deprecated checkpoint file
+     by inspecting its variables.
+
+  Args:
+    checkpoint_path: str, path to checkpoint.
+    checkpoint_type: str, denotes the type of checkpoint.
+    model_dir: The model directory to store intermediate training checkpoints.
+
+  Raises:
+    RuntimeError: If
+      1. We detect an deprecated checkpoint file.
+      2. model_dir and checkpoint_path are in the same directory.
+  """
+  variables = tf.train.list_variables(checkpoint_path)
+
+  if checkpoint_type in DEPRECATED_CHECKPOINT_MAP:
+    blocked_prefix, msg = DEPRECATED_CHECKPOINT_MAP[checkpoint_type]
+    for var_name, _ in variables:
+      if var_name.startswith(blocked_prefix):
+        tf.logging.error('Found variable name - %s with prefix %s', var_name,
+                         blocked_prefix)
+        raise RuntimeError(msg)
+
+  checkpoint_path_dir = os.path.abspath(os.path.dirname(checkpoint_path))
+  model_dir = os.path.abspath(model_dir)
+
+  if model_dir == checkpoint_path_dir:
+    raise RuntimeError(
+        ('Checkpoint dir ({}) and model_dir ({}) cannot be same.'.format(
+            checkpoint_path_dir, model_dir) +
+         (' Please set model_dir to a different path.')))

@@ -1,4 +1,3 @@
-# Lint as: python2, python3
 # Copyright 2017 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,7 +29,11 @@ import tf_slim as slim
 from object_detection.meta_architectures import faster_rcnn_meta_arch
 from object_detection.utils import variables_helper
 from nets.nasnet import nasnet_utils
-from nets.nasnet import pnasnet
+
+try:
+  from nets.nasnet import pnasnet  # pylint: disable=g-import-not-at-top
+except:  # pylint: disable=bare-except
+  pass
 
 arg_scope = slim.arg_scope
 

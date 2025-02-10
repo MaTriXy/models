@@ -1,4 +1,4 @@
-# Copyright 2018 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2024 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,36 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Preprocess dataset and construct any necessary artifacts."""
 
 from __future__ import absolute_import
 from __future__ import division
-# from __future__ import google_type_annotations
 from __future__ import print_function
 
 import os
 import pickle
 import time
 import timeit
+import typing
+from typing import Dict, Text, Tuple
 
-# pylint: disable=wrong-import-order
 from absl import logging
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-import typing
-from typing import Dict, Text, Tuple
-# pylint: enable=wrong-import-order
+import tensorflow as tf, tf_keras
 
 from official.recommendation import constants as rconst
 from official.recommendation import data_pipeline
 from official.recommendation import movielens
 
 
-_EXPECTED_CACHE_KEYS = (
-    rconst.TRAIN_USER_KEY, rconst.TRAIN_ITEM_KEY, rconst.EVAL_USER_KEY,
-    rconst.EVAL_ITEM_KEY, rconst.USER_MAP, rconst.ITEM_MAP)
+_EXPECTED_CACHE_KEYS = (rconst.TRAIN_USER_KEY, rconst.TRAIN_ITEM_KEY,
+                        rconst.EVAL_USER_KEY, rconst.EVAL_ITEM_KEY,
+                        rconst.USER_MAP, rconst.ITEM_MAP)
 
 
 def read_dataframe(
@@ -178,22 +175,25 @@ def _filter_index_sort(raw_rating_path: Text,
     eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
 
     data = {
-        rconst.TRAIN_USER_KEY: train_df[movielens.USER_COLUMN]
-                               .values.astype(rconst.USER_DTYPE),
-        rconst.TRAIN_ITEM_KEY: train_df[movielens.ITEM_COLUMN]
-                               .values.astype(rconst.ITEM_DTYPE),
-        rconst.EVAL_USER_KEY: eval_df[movielens.USER_COLUMN]
-                              .values.astype(rconst.USER_DTYPE),
-        rconst.EVAL_ITEM_KEY: eval_df[movielens.ITEM_COLUMN]
-                              .values.astype(rconst.ITEM_DTYPE),
-        rconst.USER_MAP: user_map,
-        rconst.ITEM_MAP: item_map,
-        "create_time": time.time(),
+        rconst.TRAIN_USER_KEY:
+            train_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
+        rconst.TRAIN_ITEM_KEY:
+            train_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+        rconst.EVAL_USER_KEY:
+            eval_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
+        rconst.EVAL_ITEM_KEY:
+            eval_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+        rconst.USER_MAP:
+            user_map,
+        rconst.ITEM_MAP:
+            item_map,
+        "create_time":
+            time.time(),
     }
 
     logging.info("Writing raw data cache.")
     with tf.io.gfile.GFile(cache_path, "wb") as f:
-      pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+      pickle.dump(data, f, protocol=4)
 
   # TODO(robieta): MLPerf cache clear.
   return data, valid_cache
@@ -217,8 +217,8 @@ def instantiate_pipeline(dataset,
       for the input pipeline.
     deterministic: Tell the data constructor to produce deterministically.
     epoch_dir: Directory in which to store the training epochs.
-    generate_data_offline: Boolean, whether current pipeline is done offline
-      or while training.
+    generate_data_offline: Boolean, whether current pipeline is done offline or
+      while training.
   """
   logging.info("Beginning data preprocessing.")
 
@@ -258,8 +258,8 @@ def instantiate_pipeline(dataset,
       create_data_offline=generate_data_offline)
 
   run_time = timeit.default_timer() - st
-  logging.info("Data preprocessing complete. Time: {:.1f} sec."
-               .format(run_time))
+  logging.info(
+      "Data preprocessing complete. Time: {:.1f} sec.".format(run_time))
 
   print(producer)
   return num_users, num_items, producer
